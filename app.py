@@ -1,5 +1,7 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file, after_this_request
 import yt_dlp
+import tempfile
+import os
 
 app = Flask(__name__)
 
@@ -20,6 +22,20 @@ def health():
     })
 
 
+def is_valid_facebook_url(video_url):
+    allowed_hosts = (
+        "facebook.com",
+        "www.facebook.com",
+        "m.facebook.com",
+        "fb.watch"
+    )
+
+    return (
+        video_url.startswith(("https://", "http://"))
+        and any(host in video_url.lower() for host in allowed_hosts)
+    )
+
+
 @app.route("/download", methods=["POST"])
 def download_video():
 
@@ -32,20 +48,7 @@ def download_video():
             "message": "Video URL is required."
         }), 400
 
-    allowed_hosts = (
-        "facebook.com",
-        "www.facebook.com",
-        "m.facebook.com",
-        "fb.watch"
-    )
-
-    if not video_url.startswith(("https://", "http://")):
-        return jsonify({
-            "success": False,
-            "message": "Invalid URL."
-        }), 400
-
-    if not any(host in video_url.lower() for host in allowed_hosts):
+    if not is_valid_facebook_url(video_url):
         return jsonify({
             "success": False,
             "message": "Please provide a valid Facebook URL."
@@ -85,6 +88,88 @@ def download_video():
             "success": False,
             "message": "This video could not be processed. Make sure it is publicly accessible and you have permission to download it."
         }), 400
+
+
+@app.route("/download-file", methods=["GET"])
+def download_file():
+
+    video_url = request.args.get("url", "").strip()
+
+    if not video_url:
+        return "Video URL is required.", 400
+
+    if not is_valid_facebook_url(video_url):
+        return "Invalid Facebook URL.", 400
+
+    temp_dir = tempfile.mkdtemp()
+
+    output_template = os.path.join(
+        temp_dir,
+        "facebook_video.%(ext)s"
+    )
+
+    try:
+        options = {
+            "quiet": True,
+            "no_warnings": True,
+            "format": "best",
+            "outtmpl": output_template
+        }
+
+        with yt_dlp.YoutubeDL(options) as ydl:
+            ydl.download([video_url])
+
+        files = os.listdir(temp_dir)
+
+        if not files:
+            return "Video download failed.", 500
+
+        file_path = os.path.join(
+            temp_dir,
+            files[0]
+        )
+
+        @after_this_request
+        def cleanup(response):
+            try:
+                for filename in os.listdir(temp_dir):
+                    os.remove(
+                        os.path.join(
+                            temp_dir,
+                            filename
+                        )
+                    )
+                os.rmdir(temp_dir)
+            except Exception:
+                pass
+
+            return response
+
+        return send_file(
+            file_path,
+            as_attachment=True,
+            download_name="facebook-video.mp4"
+        )
+
+    except Exception:
+        try:
+            for filename in os.listdir(temp_dir):
+                os.remove(
+                    os.path.join(
+                        temp_dir,
+                        filename
+                    )
+                )
+            os.rmdir(temp_dir)
+        except Exception:
+            pass
+
+        return (
+            "Video could not be downloaded. "
+            "Make sure it is publicly accessible "
+            "and you have permission to download it.",
+            400
+        )
 
 
 if __name__ == "__main__":
